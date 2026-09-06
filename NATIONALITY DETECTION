@@ -1,0 +1,206 @@
+import cv2
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
+from PIL import Image, ImageTk
+
+# ==========================================
+# 1. COLOR & DEMOGRAPHIC HEURISTIC MODULES
+# ==========================================
+
+def detect_dress_color(image, face_box):
+    """
+    Extracts upper body region below the face box and determines 
+    the dominant dress color using HSV color space analysis.
+    """
+    h, w, _ = image.shape
+    x, y, x2, y2 = face_box
+
+    # Define upper body / torso region relative to face position
+    torso_y1 = min(h, y2 + int((y2 - y) * 0.2))
+    torso_y2 = min(h, torso_y1 + int((y2 - y) * 1.5))
+    torso_x1 = max(0, x - int((x2 - x) * 0.2))
+    torso_x2 = min(w, x2 + int((x2 - x) * 0.2))
+
+    torso_crop = image[torso_y1:torso_y2, torso_x1:torso_x2]
+    
+    if torso_crop.size == 0:
+        return "Unknown"
+
+    # Convert to HSV color space
+    hsv = cv2.cvtColor(torso_crop, cv2.COLOR_BGR2HSV)
+    mean_hue = np.mean(hsv[:, :, 0])
+    mean_sat = np.mean(hsv[:, :, 1])
+    mean_val = np.mean(hsv[:, :, 2])
+
+    if mean_val < 50:
+        return "Black"
+    elif mean_val > 200 and mean_sat < 30:
+        return "White"
+    elif mean_sat < 40:
+        return "Gray"
+
+    # Map Hue range to standard color labels
+    if mean_hue < 10 or mean_hue > 170:
+        return "Red"
+    elif 11 <= mean_hue <= 25:
+        return "Orange"
+    elif 26 <= mean_hue <= 35:
+        return "Yellow"
+    elif 36 <= mean_hue <= 85:
+        return "Green"
+    elif 86 <= mean_hue <= 125:
+        return "Blue"
+    elif 126 <= mean_hue <= 150:
+        return "Purple"
+    elif 151 <= mean_hue <= 169:
+        return "Pink"
+    
+    return "Multi-Color"
+
+
+def run_pipeline(image_path):
+    """
+    Simulates ML inferences for Face, Nationality, Emotion, Age, 
+    and applies rule-based filtering.
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError("Invalid Image File")
+
+    h, w, _ = img.shape
+    
+    # Simple Face Box Detection placeholder (Center of image)
+    face_box = (int(w * 0.3), int(h * 0.15), int(w * 0.7), int(h * 0.55))
+
+    # Demo predictions (In production, replace with DeepFace/InsightFace models)
+    nationalities = ["Indian", "United States", "African", "German", "Japanese"]
+    emotions = ["Happy", "Neutral", "Surprise", "Sad", "Calm"]
+    
+    # Deterministic simulation for demo stability based on filename length
+    idx = len(image_path) % len(nationalities)
+    detected_nationality = nationalities[idx]
+    detected_emotion = emotions[idx % len(emotions)]
+    detected_age = 24 + (idx * 5)
+    detected_dress_color = detect_dress_color(img, face_box)
+
+    # Apply Conditional Prediction Rules
+    output_data = {
+        "Nationality": detected_nationality,
+        "Emotion": detected_emotion,
+        "Age": "N/A (Not Required)",
+        "Dress Colour": "N/A (Not Required)"
+    }
+
+    if detected_nationality == "Indian":
+        output_data["Age"] = f"{detected_age} years"
+        output_data["Dress Colour"] = detected_dress_color
+    elif detected_nationality == "United States":
+        output_data["Age"] = f"{detected_age} years"
+    elif detected_nationality == "African":
+        output_data["Dress Colour"] = detected_dress_color
+    else:
+        # Other nationalities: Only Nationality and Emotion
+        pass
+
+    # Draw Face Rectangle on Image
+    cv2.rectangle(img, (face_box[0], face_box[1]), (face_box[2], face_box[3]), (0, 255, 0), 2)
+    
+    return img, output_data
+
+
+# ==========================================
+# 2. TKINTER GUI APPLICATION
+# ==========================================
+
+class NationalityDetectorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Nationality & Demographic Analytics System")
+        self.root.geometry("900x600")
+        self.root.configure(bg="#f0f2f5")
+
+        # Title Banner
+        title_lbl = tk.Label(root, text="Nationality-Based Demographic & Attribute Predictor", 
+                             font=("Arial", 16, "bold"), bg="#f0f2f5", fg="#1a1a1a")
+        title_lbl.pack(pady=10)
+
+        # Main Layout Container
+        self.main_container = tk.Frame(root, bg="#f0f2f5")
+        self.main_container.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Left Panel: Image Upload & Preview
+        self.left_panel = tk.LabelFrame(self.main_container, text=" Input Image Preview ", 
+                                       font=("Arial", 11, "bold"), bg="white", padx=10, pady=10)
+        self.left_panel.pack(side="left", fill="both", expand=True, padx=(0, 10))
+
+        self.btn_upload = tk.Button(self.left_panel, text="📁 Upload Image", command=self.upload_image,
+                                    font=("Arial", 11, "bold"), bg="#0066cc", fg="white", padx=15, pady=5)
+        self.btn_upload.pack(pady=10)
+
+        self.lbl_image_preview = tk.Label(self.left_panel, text="No Image Selected", bg="#e1e5ea", 
+                                          width=40, height=18)
+        self.lbl_image_preview.pack(fill="both", expand=True, pady=5)
+
+        # Right Panel: Output & Prediction Display
+        self.right_panel = tk.LabelFrame(self.main_container, text=" Output & Attribute Results ", 
+                                        font=("Arial", 11, "bold"), bg="white", padx=15, pady=15)
+        self.right_panel.pack(side="right", fill="both", expand=True, padx=(10, 0))
+
+        # Result Treeview / Table
+        self.tree = ttk.Treeview(self.right_panel, columns=("Attribute", "Value"), show="headings", height=8)
+        self.tree.heading("Attribute", text="Attribute")
+        self.tree.heading("Value", text="Predicted Result")
+        self.tree.column("Attribute", width=160, anchor="center")
+        self.tree.column("Value", width=220, anchor="center")
+        self.tree.pack(fill="both", expand=True, pady=10)
+
+        # Style configuration
+        style = ttk.Style()
+        style.configure("Treeview.Heading", font=("Arial", 10, "bold"))
+        style.configure("Treeview", font=("Arial", 10), rowheight=30)
+
+        # Rule Summary Footnote
+        rule_text = (
+            "📌 Model Logic Guidelines:\n"
+            "• Indian: Nationality + Emotion + Age + Dress Colour\n"
+            "• United States: Nationality + Emotion + Age\n"
+            "• African: Nationality + Emotion + Dress Colour\n"
+            "• Others: Nationality + Emotion"
+        )
+        self.lbl_rules = tk.Label(self.right_panel, text=rule_text, font=("Arial", 9, "italic"), 
+                                  bg="white", fg="#555555", justify="left")
+        self.lbl_rules.pack(anchor="w", pady=10)
+
+    def upload_image(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg *.png *.jpeg *.webp")])
+        if not file_path:
+            return
+
+        try:
+            processed_img, results = run_pipeline(file_path)
+
+            # Display Image Preview
+            img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
+            img_pil = Image.fromarray(img_rgb).resize((350, 300))
+            img_tk = ImageTk.PhotoImage(img_pil)
+
+            self.lbl_image_preview.config(image=img_tk, text="")
+            self.lbl_image_preview.image = img_tk
+
+            # Clear Previous Output Rows
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            # Insert Formatted Results
+            for attr, val in results.items():
+                self.tree.insert("", "end", values=(attr, val))
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to process image: {str(e)}")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = NationalityDetectorApp(root)
+    root.mainloop()
