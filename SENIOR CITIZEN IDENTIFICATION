@@ -1,0 +1,207 @@
+import cv2
+import pandas as pd
+import datetime
+import os
+import time
+import tkinter as tk
+from tkinter import filedialog, ttk
+from PIL import Image, ImageTk
+
+# ==========================================
+# 1. MODEL & DATA LOGGING SETUP
+# ==========================================
+
+# Pre-trained Caffe models for Face, Age, and Gender
+FACE_PROTO = "opencv_face_detector.pbtxt"
+FACE_MODEL = "opencv_face_detector_uint8.pb"
+AGE_PROTO = "age_deploy.prototxt"
+AGE_MODEL = "age_net.caffemodel"
+GENDER_PROTO = "gender_deploy.prototxt"
+GENDER_MODEL = "gender_net.caffemodel"
+
+AGE_INTERVALS = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(25-32)', '(38-43)', '(48-53)', '(60-100)']
+GENDER_LIST = ['Male', 'Female']
+MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
+
+CSV_FILE = "mall_visitor_log.csv"
+
+# Initialize CSV if it doesn't exist
+if not os.path.exists(CSV_FILE):
+    df_init = pd.DataFrame(columns=["Timestamp", "Age_Bracket", "Estimated_Age", "Gender", "Is_Senior_Citizen"])
+    df_init.to_csv(CSV_FILE, index=False)
+
+
+def log_visitor_to_csv(age_bracket, estimated_age, gender, is_senior):
+    """Appends detected visitor record into CSV/Excel log."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_data = pd.DataFrame([{
+        "Timestamp": timestamp,
+        "Age_Bracket": age_bracket,
+        "Estimated_Age": estimated_age,
+        "Gender": gender,
+        "Is_Senior_Citizen": "Yes" if is_senior else "No"
+    }])
+    new_data.to_csv(CSV_FILE, mode='a', header=False, index=False)
+
+
+# ==========================================
+# 2. CORE DETECTION PIPELINE
+# ==========================================
+
+class SeniorDetectorPipeline:
+    def __init__(self):
+        # Load DNN Networks
+        self.face_net = cv2.dnn.readNet(FACE_MODEL, FACE_PROTO)
+        self.age_net = cv2.dnn.readNet(AGE_MODEL, AGE_PROTO)
+        self.gender_net = cv2.dnn.readNet(GENDER_MODEL, GENDER_PROTO)
+        self.last_log_time = time.time()
+
+    def process_frame(self, frame):
+        h, w = frame.shape[:2]
+        blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), [104, 117, 123], True, False)
+        self.face_net.setInput(blob)
+        detections = self.face_net.forward()
+
+        face_boxes = []
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > 0.7:  # Confidence threshold
+                x1 = int(detections[0, 0, i, 3] * w)
+                y1 = int(detections[0, 0, i, 4] * h)
+                x2 = int(detections[0, 0, i, 5] * w)
+                y2 = int(detections[0, 0, i, 6] * h)
+                face_boxes.append([x1, y1, x2, y2])
+
+        for (x1, y1, x2, y2) in face_boxes:
+            # Crop Face Region
+            padding = 10
+            face_crop = frame[max(0, y1-padding):min(y2+padding, h-1), 
+                              max(0, x1-padding):min(x2+padding, w-1)]
+
+            if face_crop.shape[0] == 0 or face_crop.shape[1] == 0:
+                continue
+
+            # Predict Gender
+            face_blob = cv2.dnn.blobFromImage(face_crop, 1.0, (227, 227), MODEL_MEAN_VALUES, swapRB=False)
+            self.gender_net.setInput(face_blob)
+            gender_preds = self.gender_net.forward()
+            gender = GENDER_LIST[gender_preds[0].argmax()]
+
+            # Predict Age
+            self.age_net.setInput(face_blob)
+            age_preds = self.age_net.forward()
+            age_idx = age_preds[0].argmax()
+            age_bracket = AGE_INTERVALS[age_idx]
+            
+            # Numeric Age Mapping (Approximate middle value of bracket)
+            age_mapping = {0: 1, 1: 5, 2: 10, 3: 17, 4: 28, 5: 40, 6: 50, 7: 65}
+            approx_age = age_mapping.get(age_idx, 30)
+
+            # Senior Citizen Criteria Logic
+            is_senior = approx_age >= 60 or age_bracket == '(60-100)'
+
+            # Drawing Bounding Box and Text Labels
+            if is_senior:
+                color = (0, 0, 255)  # Red for Senior Citizen
+                label = f"SENIOR CITIZEN | {gender} | Age: ~{approx_age}"
+            else:
+                color = (0, 255, 0)  # Green for Regular Visitor
+                label = f"VISITOR | {gender} | Age: ~{approx_age}"
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            # Throttle Logging (Log once every 3 seconds to avoid duplicate entries per frame)
+            if time.time() - self.last_log_time > 3.0:
+                log_visitor_to_csv(age_bracket, approx_age, gender, is_senior)
+                self.last_log_time = time.time()
+
+        return frame
+
+
+# ==========================================
+# 3. TKINTER GUI INTERFACE
+# ==========================================
+
+class SeniorCitizenApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Mall Store Analytics - Senior Citizen Identification")
+        self.root.geometry("900x700")
+
+        self.pipeline = SeniorDetectorPipeline()
+        self.cap = None
+        self.is_running = False
+
+        # Header Label
+        self.header = tk.Label(root, text="Real-Time Senior Citizen Detector & Visitor Logger", 
+                              font=("Arial", 16, "bold"))
+        self.header.pack(pady=10)
+
+        # Control Buttons
+        self.btn_frame = tk.Frame(root)
+        self.btn_frame.pack(pady=5)
+
+        self.btn_webcam = tk.Button(self.btn_frame, text="Start Webcam Stream", command=self.start_webcam, width=20, bg="#4CAF50", fg="white")
+        self.btn_webcam.grid(row=0, column=0, padx=10)
+
+        self.btn_video = tk.Button(self.btn_frame, text="Upload Video File", command=self.upload_video, width=20, bg="#2196F3", fg="white")
+        self.btn_video.grid(row=0, column=1, padx=10)
+
+        self.btn_stop = tk.Button(self.btn_frame, text="Stop Stream", command=self.stop_stream, width=15, bg="#f44336", fg="white")
+        self.btn_stop.grid(row=0, column=2, padx=10)
+
+        # Video Canvas
+        self.canvas = tk.Label(root, bg="black")
+        self.canvas.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Status Footer
+        self.status_lbl = tk.Label(root, text="Status: Idle | Data Logging to 'mall_visitor_log.csv'", font=("Arial", 10))
+        self.status_lbl.pack(pady=5)
+
+    def start_webcam(self):
+        self.stop_stream()
+        self.cap = cv2.VideoCapture(0)
+        self.is_running = True
+        self.status_lbl.config(text="Status: Streaming from Webcam...")
+        self.update_video()
+
+    def upload_video(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Video Files", "*.mp4 *.avi *.mkv")])
+        if file_path:
+            self.stop_stream()
+            self.cap = cv2.VideoCapture(file_path)
+            self.is_running = True
+            self.status_lbl.config(text=f"Status: Playing {os.path.basename(file_path)}")
+            self.update_video()
+
+    def update_video(self):
+        if self.is_running and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                frame = cv2.resize(frame, (720, 480))
+                processed_frame = self.pipeline.process_frame(frame)
+
+                # Convert to PIL Image for Tkinter Canvas
+                frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                img_pil = Image.fromarray(frame_rgb)
+                img_tk = ImageTk.PhotoImage(image=img_pil)
+
+                self.canvas.img_tk = img_tk
+                self.canvas.config(image=img_tk)
+                self.root.after(10, self.update_video)
+            else:
+                self.stop_stream()
+
+    def stop_stream(self):
+        self.is_running = False
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        self.canvas.config(image='')
+        self.status_lbl.config(text="Status: Stream Stopped.")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SeniorCitizenApp(root)
+    root.mainloop()
