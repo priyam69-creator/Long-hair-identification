@@ -1,4 +1,4 @@
-# Long-hair-identification
+# AGE DETECTOR
 import cv2
 import numpy as np
 import tkinter as tk
