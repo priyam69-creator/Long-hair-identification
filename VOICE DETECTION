@@ -1,0 +1,185 @@
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import librosa
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesRegressor
+from sklearn.preprocessing import StandardScaler
+
+# ==========================================
+# 1. ACOUSTIC FEATURE EXTRACTION PIPELINE
+# ==========================================
+
+def extract_audio_features(file_path):
+    """
+    Extracts MFCCs, Pitch (F0), Spectral Centroid, and Chroma 
+    features from a given audio file.
+    """
+    y, sr = librosa.load(file_path, duration=3.0, offset=0.5)
+    
+    # 1. Pitch / Fundamental Frequency (F0)
+    pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
+    f0 = []
+    for t in range(pitches.shape[1]):
+        index = magnitudes[:, t].argmax()
+        pitch = pitches[index, t]
+        if pitch > 0:
+            f0.append(pitch)
+    mean_f0 = np.mean(f0) if len(f0) > 0 else 0
+
+    # 2. MFCCs (20 coefficients)
+    mfccs = np.mean(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20).T, axis=0)
+
+    # 3. Spectral Centroid & Rolloff
+    spec_centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr).T, axis=0)
+    spec_rolloff = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr).T, axis=0)
+    
+    # Combined feature vector
+    feature_vector = np.hstack([mean_f0, mfccs, spec_centroid, spec_rolloff])
+    return mean_f0, feature_vector
+
+
+# ==========================================
+# 2. MODEL DEFINITIONS & DUMMY TRAINED WEIGHTS
+# ==========================================
+
+class AudioMLPipeline:
+    def __init__(self):
+        # Initializing dummy models trained on extracted feature vectors
+        self.gender_classifier = RandomForestClassifier(n_estimators=50, random_state=42)
+        self.age_regressor = ExtraTreesRegressor(n_estimators=50, random_state=42)
+        self.emotion_classifier = RandomForestClassifier(n_estimators=50, random_state=42)
+        
+        # Synthesize baseline demo weights for full functional execution
+        self._initialize_synthetic_weights()
+
+    def _initialize_synthetic_weights(self):
+        """Fits baseline parameters so the GUI is runnable out-of-the-box."""
+        X_dummy = np.random.rand(20, 23)
+        # Gender: 0 = Male, 1 = Female
+        y_gender = np.array([0]*10 + [1]*10)
+        y_age = np.random.randint(18, 75, size=20)
+        y_emotion = np.random.choice(["Happy", "Sad", "Angry", "Neutral"], size=20)
+
+        self.gender_classifier.fit(X_dummy, y_gender)
+        self.age_regressor.fit(X_dummy, y_age)
+        self.emotion_classifier.fit(X_dummy, y_emotion)
+
+    def predict(self, file_path):
+        mean_f0, features = extract_audio_features(file_path)
+        features_reshaped = features.reshape(1, -1)
+
+        # Rule-based/Heuristic pitch threshold override for Gender Accuracy:
+        # F0 < 165Hz strongly indicates Male voice
+        if 50 <= mean_f0 <= 165:
+            gender = "Male"
+        elif mean_f0 > 165:
+            gender = "Female"
+        else:
+            # Fallback to ML classifier
+            pred_g = self.gender_classifier.predict(features_reshaped)[0]
+            gender = "Male" if pred_g == 0 else "Female"
+
+        # Gatekeeper Check
+        if gender == "Female":
+            return {"status": "REJECTED", "message": "Upload male voice."}
+
+        # Predict Age
+        predicted_age = int(self.age_regressor.predict(features_reshaped)[0])
+        # Direct rule override for demonstration calibration
+        predicted_age = max(18, min(80, predicted_age))
+
+        # Check Senior Citizen Criteria (> 60)
+        if predicted_age > 60:
+            emotion = self.emotion_classifier.predict(features_reshaped)[0]
+            return {
+                "status": "SUCCESS",
+                "gender": "Male",
+                "age": predicted_age,
+                "is_senior": True,
+                "emotion": emotion
+            }
+        else:
+            return {
+                "status": "SUCCESS",
+                "gender": "Male",
+                "age": predicted_age,
+                "is_senior": False,
+                "emotion": None
+            }
+
+
+# ==========================================
+# 3. TKINTER GRAPHICAL USER INTERFACE
+# ==========================================
+
+class VoiceAnalysisGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Audio Demographics & Emotion Classifier")
+        self.root.geometry("520x450")
+        self.root.configure(bg="#f4f6f9")
+
+        self.pipeline = AudioMLPipeline()
+
+        # UI Elements
+        tk.Label(root, text="Voice Note Age & Emotion Detector", 
+                 font=("Helvetica", 14, "bold"), bg="#f4f6f9", fg="#333").pack(pady=15)
+
+        self.btn_upload = tk.Button(root, text="Upload Voice Note (.wav)", command=self.upload_audio,
+                                    font=("Helvetica", 11, "bold"), bg="#007bff", fg="white", 
+                                    padx=15, pady=8, relief="flat")
+        self.btn_upload.pack(pady=10)
+
+        self.lbl_file = tk.Label(root, text="No file selected", font=("Helvetica", 9, "italic"), bg="#f4f6f9", fg="#777")
+        self.lbl_file.pack(pady=5)
+
+        # Results Display Card
+        self.card_frame = tk.Frame(root, bg="white", relief="solid", bd=1)
+        self.card_frame.pack(fill="both", expand=True, padx=30, pady=20)
+
+        self.lbl_status = tk.Label(self.card_frame, text="Upload an audio file to start analysis", 
+                                   font=("Helvetica", 11), bg="white", fg="#555", justify="left")
+        self.lbl_status.pack(padx=20, pady=20)
+
+    def upload_audio(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.wav *.flac *.mp3")])
+        if not file_path:
+            return
+
+        self.lbl_file.config(text=f"File: {os.path.basename(file_path)}")
+        
+        try:
+            results = self.pipeline.predict(file_path)
+
+            if results["status"] == "REJECTED":
+                self.lbl_status.config(text=f"⚠️ {results['message']}", fg="red", font=("Helvetica", 12, "bold"))
+                messagebox.showwarning("Access Denied", results["message"])
+            else:
+                output_text = (
+                    f"✓ Gender Detected: {results['gender']}\n"
+                    f"✓ Estimated Age: {results['age']} years\n"
+                )
+                if results["is_senior"]:
+                    output_text += (
+                        f"----------------------------------------\n"
+                        f"👵 SENIOR CITIZEN DETECTED (>60)\n"
+                        f"✓ Detected Emotion: {results['emotion'].upper()}"
+                    )
+                    self.lbl_status.config(text=output_text, fg="#28a745", font=("Helvetica", 11, "bold"))
+                else:
+                    output_text += (
+                        f"----------------------------------------\n"
+                        f"Status: Regular Adult (<=60)\n"
+                        f"Emotion Detection: Skipped"
+                    )
+                    self.lbl_status.config(text=output_text, fg="#007bff", font=("Helvetica", 11, "bold"))
+
+        except Exception as e:
+            messagebox.showerror("Processing Error", f"Failed to analyze audio: {str(e)}")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = VoiceAnalysisGUI(root)
+    root.mainloop()
