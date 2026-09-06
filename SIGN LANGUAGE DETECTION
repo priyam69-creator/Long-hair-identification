@@ -1,0 +1,241 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import datetime
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+
+# ==========================================
+# 1. TIME VALIDATION UTILITY
+# ==========================================
+
+START_HOUR = 18  # 6 PM
+END_HOUR = 22    # 10 PM
+
+def is_within_operating_hours():
+    """
+    Checks if current local time is between 6:00 PM and 10:00 PM.
+    Returns True if allowed, False otherwise.
+    """
+    now = datetime.datetime.now().time()
+    start_time = datetime.time(START_HOUR, 0, 0)
+    end_time = datetime.time(END_HOUR, 0, 0)
+    
+    return start_time <= now <= end_time
+
+
+# ==========================================
+# 2. SIGN LANGUAGE RECOGNITION ENGINE
+# ==========================================
+
+class SignLanguageClassifier:
+    def __init__(self):
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False, 
+            max_num_hands=1, 
+            min_detection_confidence=0.7
+        )
+        self.mp_draw = mp.solutions.drawing_utils
+        self.labels = ["HELLO", "THANK YOU", "YES", "NO", "PEACE"]
+
+    def predict_gesture(self, landmarks):
+        """
+        Simple landmark-distance heuristic model predicting gesture labels.
+        (Replace with trained joblib model prediction: `self.model.predict(...)`)
+        """
+        # Landmark 8: Index tip, Landmark 12: Middle tip, Landmark 4: Thumb tip, Landmark 0: Wrist
+        thumb_tip = landmarks[4]
+        index_tip = landmarks[8]
+        middle_tip = landmarks[12]
+        wrist = landmarks[0]
+
+        # Calculate relative vertical distances to wrist
+        index_up = index_tip.y < landmarks[6].y
+        middle_up = middle_tip.y < landmarks[10].y
+        ring_up = landmarks[16].y < landmarks[14].y
+        pinky_up = landmarks[20].y < landmarks[18].y
+
+        if index_up and middle_up and not ring_up and not pinky_up:
+            return "PEACE"
+        elif index_up and middle_up and ring_up and pinky_up:
+            return "HELLO"
+        elif not index_up and not middle_up and not ring_up and not pinky_up:
+            return "YES"
+        elif index_up and not middle_up and not ring_up and not pinky_up:
+            return "NO"
+        else:
+            return "THANK YOU"
+
+    def process_frame(self, frame):
+        """Processes RGB frame, draws hand landmarks, and outputs prediction label."""
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+        predicted_label = "NO HAND DETECTED"
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+                predicted_label = self.predict_gesture(hand_landmarks.landmark)
+
+                # Draw prediction text box
+                cv2.rectangle(frame, (10, 10), (320, 60), (0, 0, 0), -1)
+                cv2.putText(frame, f"Sign: {predicted_label}", (20, 45),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        return frame, predicted_label
+
+
+# ==========================================
+# 3. TKINTER GRAPHICAL USER INTERFACE
+# ==========================================
+
+class SignLanguageApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Sign Language Recognition System (Operating Window: 6 PM - 10 PM)")
+        self.root.geometry("850x680")
+
+        self.classifier = SignLanguageClassifier()
+        self.cap = None
+        self.is_streaming = False
+
+        # Header Label
+        self.lbl_title = tk.Label(
+            root, text="Real-Time & Image Sign Language Recognizer", 
+            font=("Helvetica", 14, "bold")
+        )
+        self.lbl_title.pack(pady=10)
+
+        # Time Window Status Banner
+        self.lbl_time_status = tk.Label(
+            root, text="", font=("Helvetica", 10, "bold"), pady=5
+        )
+        self.lbl_time_status.pack(fill="x")
+        self.check_time_window()
+
+        # Control Panel Buttons
+        self.btn_frame = tk.Frame(root)
+        self.btn_frame.pack(pady=10)
+
+        self.btn_upload = tk.Button(
+            self.btn_frame, text="Upload Image", command=self.upload_image,
+            width=18, bg="#2196F3", fg="white", font=("Helvetica", 10, "bold")
+        )
+        self.btn_upload.grid(row=0, column=0, padx=10)
+
+        self.btn_webcam = tk.Button(
+            self.btn_frame, text="Start Video Feed", command=self.start_webcam,
+            width=18, bg="#4CAF50", fg="white", font=("Helvetica", 10, "bold")
+        )
+        self.btn_webcam.grid(row=0, column=1, padx=10)
+
+        self.btn_stop = tk.Button(
+            self.btn_frame, text="Stop Stream", command=self.stop_stream,
+            width=15, bg="#f44336", fg="white", font=("Helvetica", 10, "bold")
+        )
+        self.btn_stop.grid(row=0, column=2, padx=10)
+
+        # Video Display Canvas
+        self.display_label = tk.Label(root, bg="#111111")
+        self.display_label.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Output Results Banner
+        self.lbl_output = tk.Label(
+            root, text="Prediction: Waiting for input...", 
+            font=("Helvetica", 12), fg="#333"
+        )
+        self.lbl_output.pack(pady=10)
+
+    def check_time_window(self):
+        """Updates UI status and verifies if operating window is active."""
+        if is_within_operating_hours():
+            self.lbl_time_status.config(
+                text="SYSTEM ACTIVE (Allowed Window: 06:00 PM - 10:00 PM)", 
+                bg="#d4edda", fg="#155724"
+            )
+            return True
+        else:
+            self.lbl_time_status.config(
+                text="SYSTEM LOCKED (Operational only from 06:00 PM to 10:00 PM)", 
+                bg="#f8d7da", fg="#721c24"
+            )
+            return False
+
+    def upload_image(self):
+        """Processes static uploaded image if within allowed operating hours."""
+        if not self.check_time_window():
+            messagebox.showwarning("Access Restricted", "The model operates only between 6 PM and 10 PM.")
+            return
+
+        self.stop_stream()
+        file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg *.png *.jpeg")])
+        if not file_path:
+            return
+
+        img = cv2.imread(file_path)
+        if img is None:
+            messagebox.showerror("Error", "Failed to load image.")
+            return
+
+        img = cv2.resize(img, (640, 480))
+        processed_frame, label = self.classifier.process_frame(img)
+
+        # Render on Canvas
+        self.render_frame_to_gui(processed_frame)
+        self.lbl_output.config(text=f"Detected Sign Language Word: {label}", fg="green")
+
+    def start_webcam(self):
+        """Starts real-time webcam processing if within operating hours."""
+        if not self.check_time_window():
+            messagebox.showwarning("Access Restricted", "The model operates only between 6 PM and 10 PM.")
+            return
+
+        self.stop_stream()
+        self.cap = cv2.VideoCapture(0)
+        self.is_streaming = True
+        self.update_video_feed()
+
+    def update_video_feed(self):
+        """Continuous webcam loop with live operating window evaluation."""
+        if not self.check_time_window():
+            self.stop_stream()
+            messagebox.showwarning("Time Window Expired", "Operating time (6 PM - 10 PM) concluded. Stream stopped.")
+            return
+
+        if self.is_streaming and self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                frame = cv2.flip(frame, 1)  # Mirror frame
+                frame = cv2.resize(frame, (640, 480))
+                processed_frame, label = self.classifier.process_frame(frame)
+
+                self.render_frame_to_gui(processed_frame)
+                self.lbl_output.config(text=f"Live Prediction: {label}", fg="blue")
+                self.root.after(10, self.update_video_feed)
+            else:
+                self.stop_stream()
+
+    def render_frame_to_gui(self, cv_frame):
+        """Converts OpenCV BGR format to Tkinter PIL Image format."""
+        frame_rgb = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(frame_rgb)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+
+        self.display_label.img_tk = img_tk
+        self.display_label.config(image=img_tk)
+
+    def stop_stream(self):
+        self.is_streaming = False
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        self.display_label.config(image='')
+        self.lbl_output.config(text="Status: Idle", fg="#333")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SignLanguageApp(root)
+    root.mainloop()
